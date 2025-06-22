@@ -1,2 +1,15 @@
 .env
-node_modules
+node_modules/
+client/node_modules/
+__pycache__/
+*.pyc
+exports/
+*.xlsx
+.DS_Store
+.env.*
+# Build output
+client/build/
+# Log files
+*.log
+# VSCode settings
+.vscode/

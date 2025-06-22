@@ -1,4 +1,6 @@
-require('dotenv').config();
+const dotenv = require('dotenv');
+dotenv.config({ path: __dirname + '/.env' });
+
 const express = require('express');
 const mysql = require('mysql2');
 const passport = require('passport');
@@ -7,7 +9,7 @@ const session = require('express-session');
 const cors = require('cors');
 const path = require('path');
 
-// Debug: Check if environment variables are loaded
+// Minimal environment variable check (no sensitive data)
 console.log('🔍 Environment Variables Check:');
 console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? '✅ Loaded' : '❌ Not loaded');
 console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET ? '✅ Loaded' : '❌ Not loaded');
@@ -128,7 +130,7 @@ function initializeDatabase() {
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: "/auth/google/callback"
+  callbackURL: process.env.GOOGLE_CALLBACK_URL || "http://localhost:5000/auth/google/callback"
 }, async (accessToken, refreshToken, profile, done) => {
   try {
     const email = profile.emails[0].value;
@@ -428,7 +430,34 @@ app.post('/api/admin/query', (req, res) => {
   })
   .catch(error => {
     console.error('Error processing AI query:', error);
-    res.status(500).json({ error: 'Failed to process query' });
+    
+    // Extract detailed error information
+    let errorMessage = 'Failed to process query';
+    let errorDetails = '';
+    
+    if (error.response) {
+      // The request was made and the server responded with a status code
+      // that falls out of the range of 2xx
+      errorMessage = `AI Service Error: ${error.response.status}`;
+      errorDetails = error.response.data?.error || error.response.data || 'No error details provided';
+      console.error('AI Service Response:', error.response.data);
+    } else if (error.request) {
+      // The request was made but no response was received
+      errorMessage = 'AI Service Connection Error';
+      errorDetails = 'No response received from AI service. Is the Python service running on port 5002?';
+      console.error('No response from AI service:', error.request);
+    } else {
+      // Something happened in setting up the request that triggered an Error
+      errorMessage = 'Request Setup Error';
+      errorDetails = error.message;
+      console.error('Request setup error:', error.message);
+    }
+    
+    res.status(500).json({ 
+      error: errorMessage,
+      details: errorDetails,
+      timestamp: new Date().toISOString()
+    });
   });
 });
 
@@ -464,31 +493,74 @@ app.post('/api/send-emails', (req, res) => {
 
   const nodemailer = require('nodemailer');
   
-  const transporter = nodemailer.createTransporter({
+  // Updated Gmail configuration with better security
+  const transporter = nodemailer.createTransport({
     service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false, // true for 465, false for other ports
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASSWORD
+    },
+    tls: {
+      rejectUnauthorized: false
     }
   });
 
-  const emailPromises = emails.map(email => {
-    return transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email.trim(),
-      subject: subject || 'CRM Campaign Email',
-      text: message || 'Thank you for being our valued customer!'
+  // Verify transporter configuration
+  transporter.verify(function(error, success) {
+    if (error) {
+      console.error('Email transporter verification failed:', error);
+      return res.status(500).json({ 
+        error: 'Email service configuration error',
+        details: error.message 
+      });
+    }
+    
+    console.log('Email server is ready to send messages');
+    
+    // Send emails after verification
+    const emailPromises = emails.map(email => {
+      return transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: email.trim(),
+        subject: subject || 'CRM Campaign Email',
+        text: message || 'Thank you for being our valued customer!'
+      }).catch(error => {
+        console.error(`Failed to send email to ${email}:`, error);
+        return { error: true, email: email, message: error.message };
+      });
     });
-  });
 
-  Promise.all(emailPromises)
-    .then(() => {
-      res.json({ message: `Successfully sent emails to ${emails.length} recipients` });
-    })
-    .catch(error => {
-      console.error('Error sending emails:', error);
-      res.status(500).json({ error: 'Failed to send some emails' });
-    });
+    Promise.all(emailPromises)
+      .then((results) => {
+        const successful = results.filter(r => !r.error).length;
+        const failed = results.filter(r => r.error).length;
+        
+        if (failed === 0) {
+          res.json({ 
+            message: `Successfully sent emails to ${successful} recipients`,
+            sent: successful,
+            failed: failed
+          });
+        } else {
+          res.json({ 
+            message: `Sent ${successful} emails, ${failed} failed`,
+            sent: successful,
+            failed: failed,
+            errors: results.filter(r => r.error)
+          });
+        }
+      })
+      .catch(error => {
+        console.error('Error sending emails:', error);
+        res.status(500).json({ 
+          error: 'Failed to send emails',
+          details: error.message 
+        });
+      });
+  });
 });
 
 // Serve static files from React build
