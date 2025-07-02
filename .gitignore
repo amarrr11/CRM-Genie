@@ -2,7 +2,7 @@
 node_modules/
 client/node_modules/
 __pycache__/
-*.pyc
+*.py
 exports/
 *.xlsx
 .DS_Store

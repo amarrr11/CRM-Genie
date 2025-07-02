@@ -6,6 +6,9 @@ const Dashboard = ({ user, onLogout }) => {
   const [orders, setOrders] = useState([]);
   const [newOrderAmount, setNewOrderAmount] = useState('');
   const [loading, setLoading] = useState(false);
+  const [predictiveQuery, setPredictiveQuery] = useState('');
+  const [predictiveResults, setPredictiveResults] = useState(null);
+  const [isPredictiveLoading, setIsPredictiveLoading] = useState(false);
 
   useEffect(() => {
     fetchOrders();
@@ -38,6 +41,24 @@ const Dashboard = ({ user, onLogout }) => {
       alert('Failed to create order');
     }
     setLoading(false);
+  };
+
+  const handlePredictiveQuery = async () => {
+    if (!predictiveQuery.trim()) return;
+    
+    setIsPredictiveLoading(true);
+    try {
+      const response = await axios.post('http://localhost:5001/api/query', {
+        query: predictiveQuery
+      });
+      
+      setPredictiveResults(response.data);
+    } catch (error) {
+      console.error('Error with predictive query:', error);
+      alert('Error processing predictive query');
+    } finally {
+      setIsPredictiveLoading(false);
+    }
   };
 
   return (
@@ -131,6 +152,79 @@ const Dashboard = ({ user, onLogout }) => {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* LangChain Predictive Analytics Section */}
+          <div className="predictive-analytics-section">
+            <h3>🤖 LangChain Business Intelligence</h3>
+            <p className="section-description">
+              Advanced AI-powered analytics using LangChain agents for predictive insights, 
+              churn analysis, and business recommendations.
+            </p>
+            
+            <div className="query-examples">
+              <h4>💡 Try these advanced queries:</h4>
+              <div className="example-queries">
+                <button 
+                  onClick={() => setPredictiveQuery("Analyze customer churn risk and provide recommendations")}
+                  className="example-btn"
+                >
+                  🔍 Churn Analysis
+                </button>
+                <button 
+                  onClick={() => setPredictiveQuery("Predict next month's revenue and growth opportunities")}
+                  className="example-btn"
+                >
+                  📈 Revenue Forecast
+                </button>
+                <button 
+                  onClick={() => setPredictiveQuery("Perform customer segmentation analysis")}
+                  className="example-btn"
+                >
+                  👥 Customer Segmentation
+                </button>
+                <button 
+                  onClick={() => setPredictiveQuery("Provide business intelligence insights")}
+                  className="example-btn"
+                >
+                  📊 Business Insights
+                </button>
+              </div>
+            </div>
+            
+            <div className="query-input-section">
+              <textarea
+                value={predictiveQuery}
+                onChange={(e) => setPredictiveQuery(e.target.value)}
+                placeholder="Ask for predictive analytics, business insights, or AI recommendations..."
+                className="query-input"
+                rows="3"
+              />
+              <button 
+                onClick={handlePredictiveQuery}
+                disabled={isPredictiveLoading || !predictiveQuery.trim()}
+                className="query-btn"
+              >
+                {isPredictiveLoading ? '🤖 AI Analyzing...' : '🚀 Get AI Insights'}
+              </button>
+            </div>
+            
+            {predictiveResults && (
+              <div className="results-section">
+                <h4>🎯 AI Analysis Results:</h4>
+                <div className="results-content">
+                  {predictiveResults.type === 'predictive_analytics' ? (
+                    <div className="predictive-results">
+                      <pre className="ai-analysis">{predictiveResults.data}</pre>
+                    </div>
+                  ) : (
+                    <div className="table-results">
+                      {/* Existing table display logic */}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -20,7 +20,7 @@ const AdminDashboard = ({ user, onLogout }) => {
 
   const fetchCampaigns = async () => {
     try {
-      const response = await axios.get('http://localhost:5000/api/admin/campaigns');
+      const response = await axios.get('/api/admin/campaigns');
 
       setCampaigns(response.data);
     } catch (error) {
@@ -34,7 +34,7 @@ const AdminDashboard = ({ user, onLogout }) => {
 
     setLoading(true);
     try {
-      const response = await axios.post('http://localhost:5000/api/admin/query', {
+      const response = await axios.post('/api/admin/query', {
         query: queryInput
       });
       setQueryResult(response.data);
@@ -60,7 +60,7 @@ const AdminDashboard = ({ user, onLogout }) => {
     
     setLoading(true);
     try {
-      const response = await axios.post('http://localhost:5000/api/send-emails', {
+      const response = await axios.post('/api/send-emails', {
         emails,
         subject: emailSubject,
         message: emailMessage

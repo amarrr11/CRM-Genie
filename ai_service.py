@@ -5,8 +5,24 @@ import google.generativeai as genai
 import os
 import pandas as pd
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+import plotly.express as px
+import plotly.graph_objects as go
+import json
+
+# LangChain imports
+from langchain.llms import OpenAI
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain, SequentialChain
+from langchain.agents import initialize_agent, AgentType, Tool
+from langchain.memory import ConversationBufferMemory
+from langchain.tools import BaseTool
+from langchain.schema import HumanMessage, SystemMessage
 
 # Load environment variables from .env file
 load_dotenv()
@@ -31,155 +47,421 @@ def connect_to_db(config):
         print(f"Database connection error: {e}")
         return None
 
-def generate_sql_query(natural_language_query):
-    """Convert natural language to SQL query using Gemini"""
-    
-    system_prompt = """
-    You are a SQL expert. Convert natural language queries to MySQL SQL queries for a CRM database.
+# Database configuration
+db_config = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'database': os.getenv('DB_NAME', 'crm')
+}
 
-    Database schema:
-    - customers table: id, name, email, visits, last_active (timestamp), total_spend, is_admin, created_at
-    - orders table: id, customer_id, spend, order_date
-
-    Rules:
-    1. Only return the SQL query, no explanations
-    2. Use proper MySQL syntax
-    3. For date calculations, use DATE_SUB(CURDATE(), INTERVAL X DAY)
-    4. For inactive users, compare last_active with current date
-    5. Always include proper WHERE conditions
-    6. If asking for count only, use COUNT(*) AS count
-    7. If asking for user data, select relevant customer fields
-
-    Example queries:
-    - "Users who spend > 10000 AND visits < 3" -> SELECT * FROM customers WHERE total_spend > 10000 AND visits < 3
-    - "Users inactive for 90 days" -> SELECT * FROM customers WHERE last_active < DATE_SUB(CURDATE(), INTERVAL 90 DAY)
-    - "How many users spend > 5000" -> SELECT COUNT(*) AS count FROM customers WHERE total_spend > 5000
-    """
-
+def get_database_schema():
+    """Get database schema for AI context"""
     try:
-        print(f"Generating SQL for query: {natural_language_query}")
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"{system_prompt}\n\nQuery: {natural_language_query}\n\nSQL:"
+        connection = connect_to_db(db_config)
+        if not connection:
+            return "Database connection failed"
         
-        print("Calling Gemini API...")
-        response = model.generate_content(prompt)
-        print(f"Gemini response: {response}")
+        cursor = connection.cursor()
         
-        if response and hasattr(response, 'text'):
-            sql_query = response.text.strip()
-            sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
-            print(f"Generated SQL query: {sql_query}")
-            return sql_query
-        else:
-            print(f"Invalid response from Gemini: {response}")
-            return None
-
-    except Exception as e:
-        print(f"Gemini API error: {e}")
-        print(f"Error type: {type(e)}")
-        traceback.print_exc()
-        return None
-
-def execute_query(connection, sql_query):
-    try:
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute(sql_query)
-        results = cursor.fetchall()
+        # Get table information
+        cursor.execute("SHOW TABLES")
+        tables = cursor.fetchall()
+        
+        schema_description = "Database Schema:\n"
+        
+        for table in tables:
+            table_name = table[0]
+            cursor.execute(f"DESCRIBE {table_name}")
+            columns = cursor.fetchall()
+            
+            schema_description += f"\nTable: {table_name}\n"
+            for col in columns:
+                schema_description += f"  - {col[0]} ({col[1]})\n"
+        
         cursor.close()
-        return results
+        connection.close()
+        return schema_description
+        
     except Exception as e:
-        print(f"Query execution error: {e}")
-        return None
+        return f"Error getting schema: {str(e)}"
 
-def is_count_query(query):
-    count_keywords = ['how many', 'count', 'number of', 'total users', 'kitne log']
-    return any(keyword in query.lower() for keyword in count_keywords)
+class PredictiveAnalyticsTool(BaseTool):
+    name = "predictive_analytics"
+    description = "Analyze customer data and predict future trends, churn risk, and business opportunities"
+    
+    def _run(self, query: str) -> str:
+        try:
+            connection = connect_to_db(db_config)
+            if not connection:
+                return "Database connection failed"
+            
+            cursor = connection.cursor()
+            
+            # Get customer data for analysis
+            cursor.execute("""
+                SELECT 
+                    c.id, c.name, c.email, c.visits, c.total_spend, 
+                    c.last_active, c.created_at,
+                    COUNT(o.id) as order_count,
+                    AVG(o.spend) as avg_order_value,
+                    DATEDIFF(CURRENT_TIMESTAMP, c.last_active) as days_inactive
+                FROM customers c
+                LEFT JOIN orders o ON c.id = o.customer_id
+                GROUP BY c.id
+            """)
+            
+            customers_data = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            
+            df = pd.DataFrame(customers_data, columns=columns)
+            
+            # Analyze based on query type
+            if "churn" in query.lower():
+                return self._analyze_churn_risk(df)
+            elif "revenue" in query.lower() or "forecast" in query.lower():
+                return self._predict_revenue(df)
+            elif "segmentation" in query.lower():
+                return self._customer_segmentation(df)
+            else:
+                return self._general_insights(df)
+                
+        except Exception as e:
+            return f"Error in predictive analysis: {str(e)}"
+    
+    def _analyze_churn_risk(self, df):
+        """Analyze customer churn risk"""
+        # Simple churn prediction based on inactivity and spending patterns
+        df['churn_risk'] = 0
+        
+        # High risk: inactive for >30 days and low spending
+        high_risk = df[(df['days_inactive'] > 30) & (df['total_spend'] < 1000)]
+        
+        # Medium risk: inactive for >15 days or declining spending
+        medium_risk = df[(df['days_inactive'] > 15) | (df['total_spend'] < 500)]
+        
+        # Low risk: active and high spending
+        low_risk = df[(df['days_inactive'] <= 7) & (df['total_spend'] > 2000)]
+        
+        analysis = f"""
+🔍 **Customer Churn Analysis**
+        
+🚨 **High Risk Customers ({len(high_risk)}):**
+{self._format_customer_list(high_risk.head(5))}
 
-def create_excel_file(data, filename):
+⚠️ **Medium Risk Customers ({len(medium_risk)}):**
+{self._format_customer_list(medium_risk.head(5))}
+
+✅ **Low Risk Customers ({len(low_risk)}):**
+{self._format_customer_list(low_risk.head(5))}
+
+💡 **Recommendations:**
+- Send personalized retention campaigns to high-risk customers
+- Implement loyalty programs for medium-risk customers
+- Upsell opportunities for low-risk customers
+        """
+        
+        return analysis
+    
+    def _predict_revenue(self, df):
+        """Predict future revenue"""
+        # Simple linear regression for revenue prediction
+        if len(df) < 5:
+            return "Insufficient data for revenue prediction"
+        
+        # Create features for prediction
+        X = df[['visits', 'order_count', 'avg_order_value']].fillna(0)
+        y = df['total_spend']
+        
+        # Simple prediction model
+        model = LinearRegression()
+        model.fit(X, y)
+        
+        # Predict next month revenue
+        avg_visits = df['visits'].mean()
+        avg_orders = df['order_count'].mean()
+        avg_order_value = df['avg_order_value'].mean()
+        
+        predicted_revenue = model.predict([[avg_visits, avg_orders, avg_order_value]])[0]
+        
+        analysis = f"""
+📈 **Revenue Prediction Analysis**
+        
+💰 **Current Total Revenue:** ₹{df['total_spend'].sum():,.2f}
+📊 **Average Customer Value:** ₹{df['total_spend'].mean():,.2f}
+🎯 **Predicted Next Month Revenue:** ₹{predicted_revenue:,.2f}
+        
+📋 **Key Metrics:**
+- Total Customers: {len(df)}
+- Active Customers: {len(df[df['days_inactive'] <= 30])}
+- Average Order Value: ₹{avg_order_value:,.2f}
+- Customer Retention Rate: {(len(df[df['days_inactive'] <= 30]) / len(df) * 100):.1f}%
+        
+💡 **Growth Opportunities:**
+- Increase average order value by 10%: +₹{predicted_revenue * 0.1:,.2f}
+- Improve retention by 5%: +₹{predicted_revenue * 0.05:,.2f}
+        """
+        
+        return analysis
+    
+    def _customer_segmentation(self, df):
+        """Customer segmentation analysis"""
+        # Segment customers based on spending and activity
+        df['segment'] = 'Regular'
+        
+        # VIP customers
+        vip_mask = (df['total_spend'] > 5000) & (df['days_inactive'] <= 7)
+        df.loc[vip_mask, 'segment'] = 'VIP'
+        
+        # High Value
+        high_value_mask = (df['total_spend'] > 2000) & (df['days_inactive'] <= 15)
+        df.loc[high_value_mask, 'segment'] = 'High Value'
+        
+        # At Risk
+        at_risk_mask = (df['days_inactive'] > 30) | (df['total_spend'] < 500)
+        df.loc[at_risk_mask, 'segment'] = 'At Risk'
+        
+        segment_counts = df['segment'].value_counts()
+        
+        analysis = f"""
+👥 **Customer Segmentation Analysis**
+        
+🏆 **VIP Customers ({segment_counts.get('VIP', 0)}):**
+- High spending (>₹5,000) and very active
+- Focus: Premium services, exclusive offers
+- Revenue contribution: {self._get_segment_revenue(df, 'VIP'):.1f}%
+
+💎 **High Value Customers ({segment_counts.get('High Value', 0)}):**
+- Good spending (>₹2,000) and active
+- Focus: Upselling, loyalty programs
+- Revenue contribution: {self._get_segment_revenue(df, 'High Value'):.1f}%
+
+📊 **Regular Customers ({segment_counts.get('Regular', 0)}):**
+- Standard customers
+- Focus: Engagement, conversion
+- Revenue contribution: {self._get_segment_revenue(df, 'Regular'):.1f}%
+
+⚠️ **At Risk Customers ({segment_counts.get('At Risk', 0)}):**
+- Inactive or low spending
+- Focus: Retention campaigns
+- Revenue contribution: {self._get_segment_revenue(df, 'At Risk'):.1f}%
+        """
+        
+        return analysis
+    
+    def _general_insights(self, df):
+        """General business insights"""
+        total_revenue = df['total_spend'].sum()
+        avg_customer_value = df['total_spend'].mean()
+        active_customers = len(df[df['days_inactive'] <= 30])
+        
+        analysis = f"""
+📊 **Business Intelligence Dashboard**
+        
+💰 **Financial Metrics:**
+- Total Revenue: ₹{total_revenue:,.2f}
+- Average Customer Value: ₹{avg_customer_value:,.2f}
+- Top Customer: ₹{df['total_spend'].max():,.2f}
+        
+👥 **Customer Metrics:**
+- Total Customers: {len(df)}
+- Active Customers: {active_customers}
+- Retention Rate: {(active_customers / len(df) * 100):.1f}%
+- Average Visits: {df['visits'].mean():.1f}
+        
+📈 **Performance Insights:**
+- Revenue per customer: ₹{total_revenue / len(df):,.2f}
+- Most valuable segment: {self._get_most_valuable_segment(df)}
+- Growth opportunity: {self._get_growth_opportunity(df)}
+        """
+        
+        return analysis
+    
+    def _format_customer_list(self, df):
+        """Format customer list for display"""
+        if len(df) == 0:
+            return "No customers in this category"
+        
+        result = ""
+        for _, row in df.head(3).iterrows():
+            result += f"- {row['name']} ({row['email']}) - ₹{row['total_spend']:,.2f}\n"
+        return result
+    
+    def _get_segment_revenue(self, df, segment):
+        """Get revenue contribution percentage for a segment"""
+        segment_revenue = df[df['segment'] == segment]['total_spend'].sum()
+        total_revenue = df['total_spend'].sum()
+        return (segment_revenue / total_revenue * 100) if total_revenue > 0 else 0
+    
+    def _get_most_valuable_segment(self, df):
+        """Get most valuable customer segment"""
+        if len(df) == 0:
+            return "No data available"
+        
+        # Simple logic: customers with highest average spending
+        high_spenders = df[df['total_spend'] > df['total_spend'].quantile(0.8)]
+        if len(high_spenders) > 0:
+            return f"Top 20% customers (₹{high_spenders['total_spend'].mean():,.2f} avg)"
+        return "Regular customers"
+    
+    def _get_growth_opportunity(self, df):
+        """Identify growth opportunities"""
+        if len(df) == 0:
+            return "No data available"
+        
+        inactive_customers = len(df[df['days_inactive'] > 30])
+        if inactive_customers > 0:
+            return f"Re-engage {inactive_customers} inactive customers"
+        
+        low_spenders = len(df[df['total_spend'] < 1000])
+        if low_spenders > 0:
+            return f"Upsell to {low_spenders} low-spending customers"
+        
+        return "Focus on new customer acquisition"
+
+# Initialize LangChain tools
+predictive_tool = PredictiveAnalyticsTool()
+
+# Create LangChain agent
+def create_business_intelligence_agent():
+    """Create a LangChain agent for business intelligence"""
+    
+    # Define tools
+    tools = [
+        Tool(
+            name="predictive_analytics",
+            func=predictive_tool._run,
+            description="Analyze customer data for churn prediction, revenue forecasting, and business insights"
+        )
+    ]
+    
+    # Create agent
+    agent = initialize_agent(
+        tools,
+        llm=ChatOpenAI(temperature=0.7, model="gpt-3.5-turbo"),
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        handle_parsing_errors=True
+    )
+    
+    return agent
+
+@app.route('/api/query', methods=['POST'])
+def handle_query():
     try:
-        df = pd.DataFrame(data)
-        excel_path = f"exports/{filename}.xlsx"
-        os.makedirs('exports', exist_ok=True)
-        df.to_excel(excel_path, index=False)
-        return excel_path
-    except Exception as e:
-        print(f"Excel creation error: {e}")
-        return None
-
-@app.route('/process-query', methods=['POST'])
-def process_query():
-    try:
-        data = request.json
-        natural_query = data.get('query')
-        db_config = data.get('db_config')
-
-        if not natural_query or not db_config:
-            return jsonify({'error': 'Query and database config are required'}), 400
-
+        data = request.get_json()
+        query_text = data.get('query', '').strip()
+        
+        if not query_text:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        # Check if it's a predictive analytics query
+        predictive_keywords = [
+            'predict', 'forecast', 'churn', 'risk', 'segmentation', 
+            'insights', 'analysis', 'trends', 'opportunity', 'recommendation'
+        ]
+        
+        is_predictive_query = any(keyword in query_text.lower() for keyword in predictive_keywords)
+        
+        if is_predictive_query:
+            # Use LangChain agent for advanced analytics
+            agent = create_business_intelligence_agent()
+            result = agent.run(query_text)
+            
+            return jsonify({
+                'data': result,
+                'query': query_text,
+                'type': 'predictive_analytics'
+            })
+        
+        # Original SQL query logic for basic queries
+        schema_description = get_database_schema()
+        
+        # Create prompt for SQL generation
+        prompt = f"""
+        You are a MySQL expert. Based on the schema below, write a SQL query that answers the user's question.
+        
+        **Schema:**
+        {schema_description}
+        
+        **Question:**
+        "{query_text}"
+        
+        **SQL Query:**
+        """
+        
+        # Generate SQL using Gemini
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        sql_query = response.text.strip().replace('`', '').replace('sql', '').strip()
+        
+        # Execute query
         connection = connect_to_db(db_config)
         if not connection:
             return jsonify({'error': 'Database connection failed'}), 500
-
-        sql_query = generate_sql_query(natural_query)
-        if not sql_query:
-            return jsonify({'error': 'Failed to generate SQL query'}), 500
-
-        print(f"Generated SQL: {sql_query}")
-
-        results = execute_query(connection, sql_query)
-        connection.close()
-
-        if results is None:
-            return jsonify({'error': 'Query execution failed'}), 500
-
-        if is_count_query(natural_query):
-            # Try both 'count' and 'COUNT(*)' keys
-            count = None
-            if results and isinstance(results[0], dict):
-                count = results[0].get('count')
-                if count is None:
-                    # Try other possible keys
-                    for k in results[0]:
-                        if 'count' in k.lower():
-                            count = results[0][k]
-                            break
-            if count is None:
-                count = len(results)
-            return jsonify({
-                'type': 'count',
-                'count': count,
-                'message': f"Found {count} users matching your criteria"
-            })
-
-        if results:
+        
+        cursor = connection.cursor()
+        cursor.execute(sql_query)
+        results = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        
+        # Handle export
+        if "export" in query_text.lower():
+            df = pd.DataFrame(results, columns=columns)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"campaign_results_{timestamp}"
-            excel_path = create_excel_file(results, filename)
-            return jsonify({
-                'type': 'data',
-                'results': results,
-                'count': len(results),
-                'excel_file': excel_path,
-                'message': f"Found {len(results)} users. Excel file generated."
-            })
-        else:
-            return jsonify({
-                'type': 'data',
-                'results': [],
-                'count': 0,
-                'message': "No users found matching your criteria"
-            })
-
+            filename = f"query_results_{timestamp}.xlsx"
+            filepath = os.path.join('exports', filename)
+            
+            # Ensure exports directory exists
+            os.makedirs('exports', exist_ok=True)
+            
+            df.to_excel(filepath, index=False)
+            
+            # Log the campaign
+            try:
+                cursor.execute(
+                    'INSERT INTO campaigns (admin_email, query_text, result_count) VALUES (?, ?, ?)',
+                    ('ai_service@crm.com', query_text, len(results))
+                )
+                connection.commit()
+            except:
+                pass  # Campaign logging is optional
+            
+            cursor.close()
+            connection.close()
+            
+            return send_file(filepath, as_attachment=True, download_name=filename)
+        
+        # Convert results to JSON
+        data = [dict(zip(columns, row)) for row in results]
+        
+        # Log the campaign
+        try:
+            cursor.execute(
+                'INSERT INTO campaigns (admin_email, query_text, result_count) VALUES (?, ?, ?)',
+                ('ai_service@crm.com', query_text, len(results))
+            )
+            connection.commit()
+        except:
+            pass  # Campaign logging is optional
+        
+        cursor.close()
+        connection.close()
+        
+        return jsonify({
+            'data': data,
+            'query': sql_query,
+            'type': 'sql_query'
+        })
+        
     except Exception as e:
+        print(f"Error in handle_query: {str(e)}")
         traceback.print_exc()
-        return jsonify({'error': 'Internal server error'}), 500
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/download-excel/<filename>')
-def download_excel(filename):
-    try:
-        return send_file(f"exports/{filename}.xlsx", as_attachment=True)
-    except Exception as e:
-        return jsonify({'error': 'File not found'}), 404
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'service': 'AI Service with LangChain'})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5002, debug=True)
+    app.run(debug=True, port=5001)

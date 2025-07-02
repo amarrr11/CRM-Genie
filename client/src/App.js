@@ -39,7 +39,7 @@ function App() {
   useEffect(() => {
     const handleOAuthRedirect = () => {
       if (window.location.pathname.startsWith('/auth/')) {
-        window.location.href = `http://localhost:5000${window.location.pathname}${window.location.search}`;
+        window.location.href = `${window.location.pathname}${window.location.search}`;
       }
     };
     
